@@ -1,0 +1,247 @@
+services:
+
+  discovery-service:
+    build:
+      context: ./discovery-service
+      dockerfile: Dockerfile
+    mem_limit: 700m
+    ports:
+      - $EUREKA_HOST_PORT:8761
+    environment:
+      - MANAGEMENT_ZIPKIN_TRACING_ENDPOINT=http://zipkin:9411/api/v2/spans
+    networks:
+      - goal-network
+
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    mem_limit: 700m
+    ports:
+      - $API_GATEWAY_PORT:8765
+    environment:
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-service:8761/eureka
+      - MANAGEMENT_ZIPKIN_TRACING_ENDPOINT=http://zipkin:9411/api/v2/spans
+    networks:
+      - goal-network
+
+  goal-service:
+    build:
+      context: ./goal-service
+      dockerfile: Dockerfile
+    mem_limit: 700m
+    ports:
+      - $GOAL_PORT:8080
+    depends_on:
+      postgres_service:
+        condition: service_healthy
+      discovery-service:
+        condition: service_started
+      keycloak:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres_service:$PG_HOST_PORT/$PG_DATABASE
+      - SPRING_DATASOURCE_USERNAME=$PG_USER
+      - SPRING_DATASOURCE_PASSWORD=$PG_PASSWORD
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-service:8761/eureka
+      - MANAGEMENT_ZIPKIN_TRACING_ENDPOINT=http://zipkin:9411/api/v2/spans
+      - SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER-URI=http://keycloak:$KEYCLOAK_PORT/realms/$KEYCLOAK_REALM_NAME
+      - REALM_CLIENT_NAME=$KEYCLOAK_CLIENT_NAME
+    networks:
+      - goal-network
+
+  test-service:
+    build:
+      context: ./test-service
+      dockerfile: Dockerfile
+    mem_limit: 700m
+    ports:
+      - $TEST_PORT:8085
+    depends_on:
+      discovery-service:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-service:8761/eureka
+      - MANAGEMENT_ZIPKIN_TRACING_ENDPOINT=http://zipkin:9411/api/v2/spans
+    networks:
+      - goal-network
+
+  postgres_service:
+    image: postgres:latest
+    restart: always
+    container_name: postgres_db
+    env_file: .env
+    environment:
+      - POSTGRES_USER=$PG_USER
+      - POSTGRES_PASSWORD=$PG_PASSWORD
+      - POSTGRES_DB=$PG_DATABASE
+    ports:
+      - $PG_HOST_PORT:5432
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - goal-network
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  pgadmin:
+    container_name: ms_pgadmin
+    image: dpage/pgadmin4
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-pgadmin4@pgadmin.org}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    volumes:
+      - pgadmin:/var/lib/pgadmin
+    ports:
+      - $PG_ADMIN_PORT:80
+    networks:
+      - goal-network
+    restart: unless-stopped
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.3.3
+    container_name: elasticsearch_springboot
+    environment:
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - "discovery.type=single-node"
+      - xpack.security.enabled=false
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - goal-network
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.3.3
+    container_name: kibana_springboot
+    ports:
+      - "5601:5601"
+    environment:
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      ELASTICSEARCH_HOSTS: '["http://elasticsearch:9200"]'
+    depends_on:
+      - elasticsearch
+    networks:
+      - goal-network
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.3.3
+    container_name: logstash_springboot
+    volumes:
+      - ./logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
+    ports:
+      - "5044:5044"
+      - "5000:5000/tcp"
+      - "5000:5000/udp"
+      - "9600:9600"
+    environment:
+      LS_JAVA_OPTS: "-Xmx256m -Xms256m"
+    networks:
+      - goal-network
+    depends_on:
+      - elasticsearch
+
+  prometheus:
+    image: prom/prometheus:v2.35.0
+    network_mode: host
+    container_name: prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus/config:/etc/prometheus/
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yaml"
+    depends_on:
+      - goal-service
+      - test-service
+    ports:
+      - 9090:9090
+
+  grafana:
+    image: grafana/grafana-oss:8.5.2
+    network_mode: host
+    container_name: grafana
+    ports:
+      - 3000:3000
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+
+  zipkin:
+    image: openzipkin/zipkin
+    container_name: zipkin
+    ports:
+      - "9411:9411"
+    networks:
+      - goal-network
+
+  mysql_keycloak_db:
+    image: mysql:latest
+    container_name: mysql_keycloak_db
+    env_file: .env
+    environment:
+      - MYSQL_DATABASE=$MYSQL_KEYCLOAK_DATABASE
+      - MYSQL_USER=$MYSQL_KEYCLOAK_USER
+      - MYSQL_PASSWORD=$MYSQL_KEYCLOAK_PASSWORD
+      - MYSQL_ROOT_PASSWORD=root
+    ports:
+      - 3306:3306
+    healthcheck:
+      test: mysqladmin ping -u root -p$${MYSQL_ROOT_PASSWORD}
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - mysql_keycloak_data:/var/lib/mysql
+    networks:
+      - goal-network
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:23.0.6
+    container_name: keycloak
+    env_file: .env
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_HOSTNAME_PORT: ${KEYCLOAK_PORT}
+
+      KC_HEALTH_ENABLED: "true"
+      KC_LOG_LEVEL: info
+      KC_HOSTNAME_STRICT_BACKCHANNEL: "true"
+      KC_HOSTNAME: localhost
+
+      KC_DB: mysql
+      KC_DB_URL_HOST: mysql_keycloak_db
+      KC_DB_URL_DATABASE: keycloak
+      KC_DB_USERNAME: ${MYSQL_KEYCLOAK_USER}
+      KC_DB_PASSWORD: ${MYSQL_KEYCLOAK_PASSWORD}
+    ports:
+      - ${KEYCLOAK_PORT}:${KEYCLOAK_PORT}
+    volumes:
+      - ./keycloak/demo-realm.json:/opt/keycloak/data/import/demo-realm.json
+    command: ["start-dev", "--http-port", "8095", "--import-realm"]
+    depends_on:
+      mysql_keycloak_db:
+        condition: service_healthy
+    networks:
+      - goal-network
+
+volumes:
+  postgres_data:
+  pgadmin:
+  mysql_keycloak_data:
+  elasticsearch_data:
+    driver: local
+
+networks:
+  goal-network:
+    name: goal-network
