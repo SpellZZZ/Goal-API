@@ -31,3 +31,17 @@ The Goal Service handles business logic related to goals, payments, periods, and
 * Unit tests (controller tests, SQL test data scripts)
 
 * Liquibase configuration (db.changelog/scripts)
+
+#### Security
+Keycloak serves as an external identity provider, handling user authentication and role-based access control. The goal-service microservice is integrated with Keycloak via Spring Security, enabling JWT token validation and secure access to protected resources. This setup provides centralized and secure authentication across the microservices architecture.
+
+
+### Run  
+```
+git clone https://github.com/SpellZZZ/file-server.git
+```
+Then 
+```
+docker compose up -d
+```
+File docker-compose.yml is used to run all microservices and supporting components like Keycloak in a unified environment. It defines containers, networks, and environment variables for each service, simplifying local testing and deployment. With Docker Compose, the entire system can be launched simultaneously with a single command.
